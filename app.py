@@ -9,12 +9,49 @@
 # from docx import Document
 # import requests
 
-
 # # ═══════════════════════════════════════════════════════════════════
-# # CONFIGURATION — paste your Google Drive API key here
+# # CONFIGURATION
 # # ═══════════════════════════════════════════════════════════════════
 
 # GOOGLE_DRIVE_API_KEY = "AIzaSyB33hUEZClIvP662hWsdqGCDcaqTz4zA5I"
+
+# ALLOWED_MIMES = {
+#     'application/pdf',
+#     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',  # .docx
+# }
+# ALLOWED_EXTENSIONS = {'.pdf', '.docx'}
+
+# # Explicitly skip these — subfolders, Excel, PPT, Sheets, Slides, etc.
+# SKIP_MIMES = {
+#     'application/vnd.google-apps.folder',
+#     'application/vnd.google-apps.spreadsheet',
+#     'application/vnd.google-apps.presentation',
+#     'application/vnd.google-apps.document',
+#     'application/vnd.google-apps.form',
+#     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',       # .xlsx
+#     'application/vnd.ms-excel',                                                 # .xls
+#     'application/vnd.openxmlformats-officedocument.presentationml.presentation',# .pptx
+#     'application/vnd.ms-powerpoint',                                            # .ppt
+#     'text/plain',
+#     'text/csv',
+#     'image/jpeg',
+#     'image/png',
+#     'image/gif',
+#     'image/webp',
+# }
+
+
+# # ═══════════════════════════════════════════════════════════════════
+# # CONFIGURATION
+# # ═══════════════════════════════════════════════════════════════════
+
+# GOOGLE_DRIVE_API_KEY = "AIzaSyB33hUEZClIvP662hWsdqGCDcaqTz4zA5I"
+
+# ALLOWED_MIMES = {
+#     'application/pdf',
+#     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+# }
+# ALLOWED_EXTENSIONS = {'.pdf', '.docx'}
 
 
 # # ═══════════════════════════════════════════════════════════════════
@@ -38,14 +75,12 @@
 #     return None, 'unknown'
 
 
-# def list_drive_folder(folder_id: str, api_key: str) -> List[Dict]:
-#     """List all PDF/DOCX files in a public Google Drive folder."""
-#     files = []
+# def list_drive_folder(folder_id: str, api_key: str) -> Tuple[List[Dict], List[str]]:
+#     """List files in a public Google Drive folder. Returns (allowed_files, skipped_names)."""
+#     allowed = []
+#     skipped = []
 #     page_token = None
-#     allowed_mimes = {
-#         'application/pdf',
-#         'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-#     }
+
 #     while True:
 #         params = {
 #             'key': api_key,
@@ -55,53 +90,87 @@
 #         }
 #         if page_token:
 #             params['pageToken'] = page_token
-#         resp = requests.get(
-#             'https://www.googleapis.com/drive/v3/files',
-#             params=params,
-#             timeout=20,
-#         )
-#         resp.raise_for_status()
+
+#         try:
+#             resp = requests.get(
+#                 'https://www.googleapis.com/drive/v3/files',
+#                 params=params,
+#                 timeout=20,
+#             )
+#         except requests.exceptions.Timeout:
+#             raise ConnectionError("Request to Google Drive timed out. Check your internet connection.")
+#         except requests.exceptions.ConnectionError:
+#             raise ConnectionError("Could not connect to Google Drive. Check your internet connection.")
+
+#         if resp.status_code == 403:
+#             raise PermissionError(
+#                 "Access denied (403). Make sure the folder is shared as 'Anyone with the link can view'."
+#             )
+#         elif resp.status_code == 404:
+#             raise FileNotFoundError("Folder not found (404). Please check the folder link or ID.")
+#         elif resp.status_code == 400:
+#             raise ValueError("Bad request (400). The folder ID may be invalid.")
+#         elif not resp.ok:
+#             raise RuntimeError(f"Google Drive API returned error {resp.status_code}: {resp.text[:200]}")
+
 #         data = resp.json()
 #         for f in data.get('files', []):
-#             if f.get('mimeType') in allowed_mimes:
-#                 files.append(f)
+#             mime = f.get('mimeType', '')
+#             name = f.get('name', '')
+#             ext = os.path.splitext(name)[-1].lower()
+#             if mime in ALLOWED_MIMES or ext in ALLOWED_EXTENSIONS:
+#                 allowed.append(f)
+#             else:
+#                 skipped.append(name)
+
 #         page_token = data.get('nextPageToken')
 #         if not page_token:
 #             break
-#     return files
+
+#     return allowed, skipped
 
 
-# def download_drive_file_public(file_id: str) -> bytes:
-#     """
-#     Download a publicly shared Google Drive file using the
-#     public export URL — no API key or OAuth needed.
-#     Handles Google's virus-scan confirmation page automatically.
-#     """
+# def download_drive_file_public(file_id: str, filename: str) -> bytes:
+#     """Download a publicly shared Google Drive file. Raises descriptive errors on failure."""
 #     session = requests.Session()
-
-#     # Primary URL — works for most files
 #     url = f"https://drive.google.com/uc?export=download&id={file_id}"
-#     resp = session.get(url, timeout=60)
+
+#     try:
+#         resp = session.get(url, timeout=60)
+#     except requests.exceptions.Timeout:
+#         raise ConnectionError(f"Download timed out for '{filename}'.")
+#     except requests.exceptions.ConnectionError:
+#         raise ConnectionError(f"Network error while downloading '{filename}'.")
+
 #     resp.raise_for_status()
 
-#     # If Google returns a confirmation page (large files / virus scan)
-#     # extract the confirm token and retry
+#     # Handle Google's virus-scan confirmation page
 #     if b'confirm=' in resp.content or b'virus scan warning' in resp.content.lower():
-#         # Try to find confirm token
 #         match = re.search(rb'confirm=([0-9A-Za-z_\-]+)', resp.content)
 #         if match:
 #             confirm = match.group(1).decode()
 #             url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm={confirm}"
-#             resp = session.get(url, timeout=60)
-#             resp.raise_for_status()
+#             try:
+#                 resp = session.get(url, timeout=60)
+#                 resp.raise_for_status()
+#             except requests.exceptions.RequestException as e:
+#                 raise RuntimeError(f"Failed to download '{filename}' after confirmation: {e}")
 
-#     # Check we actually got a file (not an HTML error page)
 #     content_type = resp.headers.get('Content-Type', '')
 #     if 'text/html' in content_type and len(resp.content) < 50_000:
-#         raise ValueError(
-#             "Got an HTML page instead of a file. "
-#             "Make sure the file is shared as 'Anyone with the link'."
+#         # Try to detect a meaningful error message
+#         body_snippet = resp.content.decode('utf-8', errors='ignore')[:300]
+#         if 'quota' in body_snippet.lower():
+#             raise RuntimeError(
+#                 f"'{filename}': Google Drive download quota exceeded. Try again later."
+#             )
+#         raise PermissionError(
+#             f"'{filename}': Got an HTML page instead of file bytes. "
+#             "Make sure this file is shared as 'Anyone with the link can view'."
 #         )
+
+#     if len(resp.content) == 0:
+#         raise ValueError(f"'{filename}': Downloaded file is empty.")
 
 #     return resp.content
 
@@ -111,49 +180,64 @@
 #     api_key: str,
 #     status_placeholder,
 #     progress_bar,
-# ) -> Tuple[List[Dict], List[str]]:
-#     raw: List[Dict]   = []
+# ) -> Tuple[List[Dict], List[str], List[str]]:
+#     """
+#     Returns:
+#         raw          – list of {filename, bytes}
+#         errors       – list of error strings (shown as st.error)
+#         skipped_info – list of informational strings (non-PDF/DOCX files ignored)
+#     """
+#     raw: List[Dict] = []
 #     errors: List[str] = []
+#     skipped_info: List[str] = []
 
-#     # Step 1: list files via API
+#     # Step 1 — list files
 #     status_placeholder.text("📂 Fetching file list from Google Drive…")
 #     try:
-#         drive_files = list_drive_folder(folder_id, api_key)
-#     except requests.HTTPError as e:
-#         code = e.response.status_code if e.response is not None else '?'
-#         if code == 403:
-#             errors.append(
-#                 "Access denied (403). Make sure the folder is shared as "
-#                 "'Anyone with the link can view'."
+#         drive_files, skipped_names = list_drive_folder(folder_id, api_key)
+#         if skipped_names:
+#             skipped_info.append(
+#                 f"Ignored {len(skipped_names)} non-PDF/DOCX file(s): "
+#                 + ", ".join(skipped_names[:10])
+#                 + ("…" if len(skipped_names) > 10 else "")
 #             )
-#         elif code == 404:
-#             errors.append("Folder not found (404). Check the folder link.")
-#         else:
-#             errors.append(f"Drive API error {code}: {e}")
-#         return raw, errors
+#     except PermissionError as e:
+#         errors.append(str(e))
+#         return raw, errors, skipped_info
+#     except FileNotFoundError as e:
+#         errors.append(str(e))
+#         return raw, errors, skipped_info
+#     except (ConnectionError, RuntimeError, ValueError) as e:
+#         errors.append(str(e))
+#         return raw, errors, skipped_info
 #     except Exception as e:
-#         errors.append(f"Could not reach Google Drive: {e}")
-#         return raw, errors
+#         errors.append(f"Unexpected error while listing folder: {e}")
+#         return raw, errors, skipped_info
 
 #     if not drive_files:
-#         errors.append("No PDF or DOCX files found in the folder.")
-#         return raw, errors
+#         errors.append(
+#             "No PDF or DOCX files found in the folder. "
+#             "Make sure the folder contains .pdf or .docx files and is shared correctly."
+#         )
+#         return raw, errors, skipped_info
 
-#     status_placeholder.text(f"📂 Found {len(drive_files)} file(s). Downloading…")
+#     status_placeholder.text(f"📂 Found {len(drive_files)} compatible file(s). Downloading…")
 
-#     # Step 2: download each file via public URL (no API key needed)
+#     # Step 2 — download each file
 #     for i, f in enumerate(drive_files):
 #         try:
 #             status_placeholder.text(
 #                 f"⬇️  Downloading {i + 1}/{len(drive_files)}: {f['name']}"
 #             )
-#             file_bytes = download_drive_file_public(f['id'])
+#             file_bytes = download_drive_file_public(f['id'], f['name'])
 #             raw.append({'filename': f['name'], 'bytes': file_bytes})
+#         except (PermissionError, RuntimeError, ConnectionError, ValueError) as e:
+#             errors.append(str(e))
 #         except Exception as e:
-#             errors.append(f"{f['name']}: {e}")
+#             errors.append(f"'{f['name']}': Unexpected error — {e}")
 #         progress_bar.progress((i + 1) / len(drive_files))
 
-#     return raw, errors
+#     return raw, errors, skipped_info
 
 
 # # ═══════════════════════════════════════════════════════════════════
@@ -553,6 +637,7 @@
 #     'non_matching':    [],
 #     'searched':        False,
 #     'last_terms':      '',
+#     'last_match_mode': 'Any term (OR)',
 # }
 # for k, v in _defaults.items():
 #     if k not in st.session_state:
@@ -561,8 +646,8 @@
 # # ── Page header ───────────────────────────────────────────────────
 # st.title("📄 Resume Extractor & Smart Search")
 # st.markdown(
-#     "Upload resumes **or paste a Google Drive folder link** → "
-#     "auto-extract key info → **dynamically search** by skill, company, location, or any keyword"
+#     "Upload resumes **or paste a Google Drive folder link**, "
+#     "optionally add search terms — then hit **Process & Search** to get results instantly."
 # )
 
 # if st.session_state.processing_done:
@@ -574,49 +659,90 @@
 # st.divider()
 
 # # ════════════════════════════════════════════════════════════════════
-# # STEP 1 — SOURCE SELECTION
+# # COMBINED INPUT PANEL — source + search terms together
 # # ════════════════════════════════════════════════════════════════════
-# st.header("① Upload & Process Resumes")
 
 # if not st.session_state.processing_done:
 
+#     st.header("Upload & Search")
+
 #     source_tab, drive_tab = st.tabs(["📁 Upload Files", "☁️ Google Drive Folder"])
+
+#     # ── Shared search input (outside tabs so it's always visible) ─
+#     st.markdown("---")
+#     st.subheader("🔍 Search / Filter (optional)")
+#     st.caption(
+#         "Enter keywords now and results will be filtered automatically after processing. "
+#         "You can also search/re-filter after processing without re-uploading."
+#     )
+
+#     col_input, col_mode = st.columns([4, 1])
+#     with col_input:
+#         search_input: str = st.text_input(
+#             "Search terms — comma-separated",
+#             value=st.session_state.last_terms,
+#             placeholder="e.g.,  Python, Bangalore, TCS, MBA, 5 years, Sales",
+#             key="search_input_main",
+#         )
+#     with col_mode:
+#         st.write("")
+#         match_mode: str = st.radio(
+#             "Match mode",
+#             ["Any term (OR)", "All terms (AND)"],
+#             index=0,
+#             key="match_mode_main",
+#         )
 
 #     # ── TAB 1: Local upload ───────────────────────────────────────
 #     with source_tab:
 #         uploaded_files = st.file_uploader(
-#             "Upload Resumes (PDF or DOCX) — up to 100 files",
+#             "Upload Resumes (PDF or DOCX) — up to 100 files. Any other file type will be ignored.",
 #             type=["pdf", "docx"],
 #             accept_multiple_files=True,
 #             key="file_uploader",
 #         )
 #         if uploaded_files:
-#             if len(uploaded_files) > 100:
-#                 st.warning("⚠️ Only the first 100 files will be processed.")
-#                 uploaded_files = uploaded_files[:100]
-#             st.info(f"📂 **{len(uploaded_files)}** file(s) ready")
+#             n = min(len(uploaded_files), 100)
+#             st.info(f"📂 **{n}** compatible file(s) selected")
 
-#         if st.button("🚀 Process Uploaded Resumes", type="primary", disabled=not uploaded_files, key="btn_upload"):
+#         if st.button("🚀 Process & Search", type="primary", disabled=not uploaded_files, key="btn_upload"):
+#             files_to_process = uploaded_files[:100]
 #             all_data: List[Dict] = []
 #             failed:   List[str]  = []
 #             prog   = st.progress(0)
 #             status = st.empty()
-#             for i, f in enumerate(uploaded_files):
-#                 status.text(f"Processing {i + 1}/{len(uploaded_files)}: {f.name}")
+
+#             for i, f in enumerate(files_to_process):
+#                 status.text(f"Processing {i + 1}/{len(files_to_process)}: {f.name}")
 #                 try:
 #                     result = process_resume(f.read(), f.name)
 #                     if result:
 #                         all_data.append(result)
 #                     else:
-#                         failed.append(f.name)
+#                         failed.append(f"{f.name} (no text extracted)")
 #                 except Exception as e:
 #                     failed.append(f"{f.name} ({e})")
-#                 prog.progress((i + 1) / len(uploaded_files))
+#                 prog.progress((i + 1) / len(files_to_process))
+
 #             prog.empty(); status.empty()
+
 #             if failed:
 #                 st.warning(f"⚠️ Skipped {len(failed)} file(s): " + ", ".join(failed[:5]))
+
 #             st.session_state.processed_data  = all_data
 #             st.session_state.processing_done = True
+#             st.session_state.last_terms      = search_input
+#             st.session_state.last_match_mode = match_mode
+
+#             # Auto-run search if terms were provided
+#             if search_input.strip() and all_data:
+#                 terms     = [t.strip() for t in search_input.split(',') if t.strip()]
+#                 match_all = "AND" in match_mode
+#                 m, nm     = search_resumes(all_data, terms, match_all)
+#                 st.session_state.matching     = m
+#                 st.session_state.non_matching = nm
+#                 st.session_state.searched     = True
+
 #             st.success(f"✅ Processed **{len(all_data)}** resumes!")
 #             st.rerun()
 
@@ -625,15 +751,18 @@
 #         st.markdown(
 #             """
 #             **How to use:**
-#             1. Open the Google Drive folder that contains your resumes
+#             1. Open the Google Drive folder containing your resumes
 #             2. Click **Share → Anyone with the link → Viewer**
-#             3. Copy the link and paste it below
+#             3. Paste the link below  
+            
+#             > Only **PDF** and **DOCX** files will be processed. All other file types are automatically ignored.
 #             """
 #         )
 
 #         drive_link = st.text_input(
 #             "🔗 Google Drive Folder Link or Folder ID",
 #             placeholder="https://drive.google.com/drive/folders/1AbCdEfGhIjKlMn...",
+#             key="drive_link_input",
 #         )
 
 #         if drive_link:
@@ -641,11 +770,11 @@
 #             if fid:
 #                 st.caption(f"✅ Detected {fkind} ID: `{fid}`")
 #             else:
-#                 st.warning("⚠️ Could not detect a valid Drive ID from this link.")
+#                 st.error("❌ Could not detect a valid Google Drive folder ID from this link. Please check the URL.")
 
 #         can_fetch = bool(drive_link.strip()) if drive_link else False
 
-#         if st.button("☁️ Fetch & Process from Google Drive", type="primary", disabled=not can_fetch, key="btn_drive"):
+#         if st.button("☁️ Fetch, Process & Search", type="primary", disabled=not can_fetch, key="btn_drive"):
 #             folder_id, kind = parse_drive_id(drive_link)
 
 #             if not folder_id:
@@ -654,15 +783,20 @@
 #                 prog   = st.progress(0)
 #                 status = st.empty()
 
-#                 raw_files, errors = fetch_resumes_from_drive(
+#                 raw_files, errors, skipped_info = fetch_resumes_from_drive(
 #                     folder_id, GOOGLE_DRIVE_API_KEY, status, prog
 #                 )
 
 #                 prog.empty(); status.empty()
 
+#                 # Show skipped files (informational)
+#                 for info in skipped_info:
+#                     st.info(f"ℹ️ {info}")
+
+#                 # Show errors (actual problems)
 #                 if errors:
 #                     for err in errors:
-#                         st.warning(f"⚠️ {err}")
+#                         st.error(f"❌ {err}")
 
 #                 if raw_files:
 #                     all_data: List[Dict] = []
@@ -677,7 +811,7 @@
 #                             if result:
 #                                 all_data.append(result)
 #                             else:
-#                                 failed.append(item['filename'])
+#                                 failed.append(f"{item['filename']} (no text extracted)")
 #                         except Exception as e:
 #                             failed.append(f"{item['filename']} ({e})")
 #                         prog2.progress((i + 1) / len(raw_files))
@@ -685,60 +819,79 @@
 #                     prog2.empty(); status2.empty()
 
 #                     if failed:
-#                         st.warning("⚠️ Skipped: " + ", ".join(failed[:5]))
+#                         st.warning("⚠️ Skipped during extraction: " + ", ".join(failed[:5]))
 
 #                     st.session_state.processed_data  = all_data
 #                     st.session_state.processing_done = True
+#                     st.session_state.last_terms      = search_input
+#                     st.session_state.last_match_mode = match_mode
+
+#                     # Auto-run search if terms were provided
+#                     if search_input.strip() and all_data:
+#                         terms     = [t.strip() for t in search_input.split(',') if t.strip()]
+#                         match_all = "AND" in match_mode
+#                         m, nm     = search_resumes(all_data, terms, match_all)
+#                         st.session_state.matching     = m
+#                         st.session_state.non_matching = nm
+#                         st.session_state.searched     = True
+
 #                     st.success(f"✅ Processed **{len(all_data)}** resumes from Google Drive!")
 #                     st.rerun()
 
+#                 elif not errors:
+#                     # raw_files is empty but no errors either — already shown above
+#                     st.warning("No processable files were downloaded. Please check the folder contents and sharing settings.")
+
+
 # # ════════════════════════════════════════════════════════════════════
-# # STEP 2 — SEARCH
+# # RESULTS PANEL — shown after processing
 # # ════════════════════════════════════════════════════════════════════
+
 # else:
 #     data: List[Dict] = st.session_state.processed_data
-#     st.success(f"✅ **{len(data)}** resumes loaded and ready to search")
+#     st.success(f"✅ **{len(data)}** resumes loaded")
 
-#     st.divider()
-#     st.header("② Search & Filter")
-
-#     col_input, col_mode = st.columns([4, 1])
-#     with col_input:
-#         search_input: str = st.text_input(
-#             "🔍 Enter search terms — comma-separated",
+#     # ── Inline re-search bar ─────────────────────────────────────
+#     st.subheader("🔍 Search & Filter")
+#     col_input2, col_mode2 = st.columns([4, 1])
+#     with col_input2:
+#         search_input2: str = st.text_input(
+#             "Search terms — comma-separated",
 #             value=st.session_state.last_terms,
-#             placeholder="e.g.,  IT, Pharma, Tata Consultancy, FMCG, Sales, Bangalore, Python, 5 years, MBA",
+#             placeholder="e.g.,  Python, Bangalore, TCS, MBA, 5 years",
+#             key="search_input_results",
 #         )
-#     with col_mode:
-#         st.write(""); st.write("")
-#         match_mode: str = st.radio(
+#     with col_mode2:
+#         st.write("")
+#         match_mode2: str = st.radio(
 #             "Match mode",
 #             ["Any term (OR)", "All terms (AND)"],
-#             index=0,
+#             index=0 if st.session_state.last_match_mode == "Any term (OR)" else 1,
+#             key="match_mode_results",
 #         )
 
-#     search_clicked = st.button("🔍 Search Resumes", type="primary", disabled=not search_input.strip())
+#     search_clicked = st.button("🔍 Search", type="primary", disabled=not search_input2.strip())
 
-#     if search_clicked and search_input.strip():
-#         terms     = [t.strip() for t in search_input.split(',') if t.strip()]
-#         match_all = "AND" in match_mode
+#     if search_clicked and search_input2.strip():
+#         terms     = [t.strip() for t in search_input2.split(',') if t.strip()]
+#         match_all = "AND" in match_mode2
 #         m, nm     = search_resumes(data, terms, match_all)
 #         st.session_state.matching     = m
 #         st.session_state.non_matching = nm
 #         st.session_state.searched     = True
-#         st.session_state.last_terms   = search_input
+#         st.session_state.last_terms   = search_input2
+#         st.session_state.last_match_mode = match_mode2
 
-#     # ── STEP 3 — RESULTS ─────────────────────────────────────────
+#     # ── RESULTS ──────────────────────────────────────────────────
 #     if st.session_state.searched:
 #         matching:     List[Dict] = st.session_state.matching
 #         non_matching: List[Dict] = st.session_state.non_matching
 #         all_terms_used = [t.strip() for t in st.session_state.last_terms.split(',') if t.strip()]
 
 #         st.divider()
-#         st.header("③ Results")
 #         st.caption(
 #             f"Search terms: **{', '.join(all_terms_used)}**  |  "
-#             f"Mode: **{match_mode}**  |  "
+#             f"Mode: **{st.session_state.last_match_mode}**  |  "
 #             f"✅ {len(matching)} matching  ·  ❌ {len(non_matching)} non-matching"
 #         )
 
@@ -759,7 +912,6 @@
 #             st.info("No resumes matched. Try different keywords or switch to **Any (OR)** mode.")
 
 #         st.divider()
-
 #         st.subheader(f"❌ Non-Matching Resumes — {len(non_matching)}")
 #         if non_matching:
 #             with st.expander(f"Show {len(non_matching)} non-matching resumes", expanded=False):
@@ -785,7 +937,8 @@
 
 #     else:
 #         st.divider()
-#         st.subheader("📊 All Processed Resumes (search above to filter)")
+#         st.subheader("📊 All Processed Resumes")
+#         st.caption("Use the search bar above to filter results.")
 #         display = [{k: v for k, v in d.items() if k != '_full_text'} for d in data]
 #         st.dataframe(pd.DataFrame(display), use_container_width=True, height=450)
 #         st.download_button(
@@ -801,6 +954,8 @@
 # st.caption("Have a GOOD DAY!!!")
 
 
+
+
 import streamlit as st
 import os
 from io import BytesIO
@@ -809,6 +964,7 @@ import re
 import PyPDF2
 from typing import List, Dict, Tuple, Optional
 import datetime
+import time
 from docx import Document
 import requests
 
@@ -821,9 +977,28 @@ GOOGLE_DRIVE_API_KEY = "AIzaSyB33hUEZClIvP662hWsdqGCDcaqTz4zA5I"
 
 ALLOWED_MIMES = {
     'application/pdf',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',  # .docx
 }
 ALLOWED_EXTENSIONS = {'.pdf', '.docx'}
+
+# Explicitly skip these — subfolders, Excel, PPT, Sheets, Slides, etc.
+SKIP_MIMES = {
+    'application/vnd.google-apps.folder',
+    'application/vnd.google-apps.spreadsheet',
+    'application/vnd.google-apps.presentation',
+    'application/vnd.google-apps.document',
+    'application/vnd.google-apps.form',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',        # .xlsx
+    'application/vnd.ms-excel',                                                  # .xls
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation', # .pptx
+    'application/vnd.ms-powerpoint',                                             # .ppt
+    'text/plain',
+    'text/csv',
+    'image/jpeg',
+    'image/png',
+    'image/gif',
+    'image/webp',
+}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -848,7 +1023,12 @@ def parse_drive_id(url_or_id: str) -> Tuple[Optional[str], str]:
 
 
 def list_drive_folder(folder_id: str, api_key: str) -> Tuple[List[Dict], List[str]]:
-    """List files in a public Google Drive folder. Returns (allowed_files, skipped_names)."""
+    """
+    List files in a public Google Drive folder.
+    - Skips subfolders entirely (does NOT recurse into them).
+    - Only returns PDF and DOCX files.
+    - Returns (allowed_files, skipped_names).
+    """
     allowed = []
     skipped = []
     page_token = None
@@ -856,8 +1036,13 @@ def list_drive_folder(folder_id: str, api_key: str) -> Tuple[List[Dict], List[st
     while True:
         params = {
             'key': api_key,
-            'q': f"'{folder_id}' in parents and trashed=false",
-            'fields': 'nextPageToken, files(id, name, mimeType, webContentLink)',
+            # Exclude subfolders at the API query level
+            'q': (
+                f"'{folder_id}' in parents "
+                f"and trashed=false "
+                f"and mimeType != 'application/vnd.google-apps.folder'"
+            ),
+            'fields': 'nextPageToken, files(id, name, mimeType)',
             'pageSize': 100,
         }
         if page_token:
@@ -889,11 +1074,18 @@ def list_drive_folder(folder_id: str, api_key: str) -> Tuple[List[Dict], List[st
         for f in data.get('files', []):
             mime = f.get('mimeType', '')
             name = f.get('name', '')
-            ext = os.path.splitext(name)[-1].lower()
+            ext  = os.path.splitext(name)[-1].lower()
+
+            # Hard skip — wrong MIME type
+            if mime in SKIP_MIMES:
+                skipped.append(f"{name} (ignored: {ext or mime})")
+                continue
+
+            # Accept only PDF and DOCX — by MIME or by extension
             if mime in ALLOWED_MIMES or ext in ALLOWED_EXTENSIONS:
                 allowed.append(f)
             else:
-                skipped.append(name)
+                skipped.append(f"{name} (ignored: unsupported type)")
 
         page_token = data.get('nextPageToken')
         if not page_token:
@@ -902,21 +1094,36 @@ def list_drive_folder(folder_id: str, api_key: str) -> Tuple[List[Dict], List[st
     return allowed, skipped
 
 
-def download_drive_file_public(file_id: str, filename: str) -> bytes:
-    """Download a publicly shared Google Drive file. Raises descriptive errors on failure."""
+def download_drive_file_public(file_id: str, filename: str, api_key: str) -> bytes:
+    """
+    Download using Drive API alt=media — more reliable than uc?export=download
+    for bulk/large folder downloads. Falls back to direct URL if API method fails.
+    """
+    # Method 1: Drive API alt=media (preferred — no virus-scan page)
+    api_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
+    try:
+        resp = requests.get(api_url, timeout=60, stream=True)
+        if resp.status_code == 200:
+            content_type = resp.headers.get('Content-Type', '')
+            if 'text/html' not in content_type:
+                data = b''.join(resp.iter_content(chunk_size=8192))
+                if len(data) > 0:
+                    return data
+    except requests.exceptions.RequestException:
+        pass  # fall through to Method 2
+
+    # Method 2: Direct download URL fallback
     session = requests.Session()
     url = f"https://drive.google.com/uc?export=download&id={file_id}"
-
     try:
         resp = session.get(url, timeout=60)
+        resp.raise_for_status()
     except requests.exceptions.Timeout:
         raise ConnectionError(f"Download timed out for '{filename}'.")
     except requests.exceptions.ConnectionError:
         raise ConnectionError(f"Network error while downloading '{filename}'.")
 
-    resp.raise_for_status()
-
-    # Handle Google's virus-scan confirmation page
+    # Handle virus-scan confirmation page
     if b'confirm=' in resp.content or b'virus scan warning' in resp.content.lower():
         match = re.search(rb'confirm=([0-9A-Za-z_\-]+)', resp.content)
         if match:
@@ -930,14 +1137,11 @@ def download_drive_file_public(file_id: str, filename: str) -> bytes:
 
     content_type = resp.headers.get('Content-Type', '')
     if 'text/html' in content_type and len(resp.content) < 50_000:
-        # Try to detect a meaningful error message
-        body_snippet = resp.content.decode('utf-8', errors='ignore')[:300]
-        if 'quota' in body_snippet.lower():
-            raise RuntimeError(
-                f"'{filename}': Google Drive download quota exceeded. Try again later."
-            )
+        body = resp.content.decode('utf-8', errors='ignore')[:300]
+        if 'quota' in body.lower():
+            raise RuntimeError(f"'{filename}': Google Drive download quota exceeded. Try again later.")
         raise PermissionError(
-            f"'{filename}': Got an HTML page instead of file bytes. "
+            f"'{filename}': Got HTML instead of file bytes. "
             "Make sure this file is shared as 'Anyone with the link can view'."
         )
 
@@ -945,6 +1149,22 @@ def download_drive_file_public(file_id: str, filename: str) -> bytes:
         raise ValueError(f"'{filename}': Downloaded file is empty.")
 
     return resp.content
+
+
+def download_with_retry(file_id: str, filename: str, api_key: str, retries: int = 3) -> bytes:
+    """Retry download with exponential backoff for transient errors."""
+    last_error = None
+    for attempt in range(retries):
+        try:
+            return download_drive_file_public(file_id, filename, api_key)
+        except (RuntimeError, PermissionError, ValueError) as e:
+            last_error = e
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)  # 1s, 2s backoff
+            continue
+        except ConnectionError:
+            raise  # network errors — no point retrying immediately
+    raise last_error
 
 
 def fetch_resumes_from_drive(
@@ -956,7 +1176,7 @@ def fetch_resumes_from_drive(
     """
     Returns:
         raw          – list of {filename, bytes}
-        errors       – list of error strings (shown as st.error)
+        errors       – list of error strings
         skipped_info – list of informational strings (non-PDF/DOCX files ignored)
     """
     raw: List[Dict] = []
@@ -969,9 +1189,9 @@ def fetch_resumes_from_drive(
         drive_files, skipped_names = list_drive_folder(folder_id, api_key)
         if skipped_names:
             skipped_info.append(
-                f"Ignored {len(skipped_names)} non-PDF/DOCX file(s): "
-                + ", ".join(skipped_names[:10])
-                + ("…" if len(skipped_names) > 10 else "")
+                f"Ignored {len(skipped_names)} non-PDF/DOCX item(s) (Excel, PPT, subfolders, images, etc.): "
+                + " | ".join(skipped_names[:20])
+                + ("…" if len(skipped_names) > 20 else "")
             )
     except PermissionError as e:
         errors.append(str(e))
@@ -995,16 +1215,17 @@ def fetch_resumes_from_drive(
 
     status_placeholder.text(f"📂 Found {len(drive_files)} compatible file(s). Downloading…")
 
-    # Step 2 — download each file
+    # Step 2 — download each file with retry
     for i, f in enumerate(drive_files):
         try:
             status_placeholder.text(
                 f"⬇️  Downloading {i + 1}/{len(drive_files)}: {f['name']}"
             )
-            file_bytes = download_drive_file_public(f['id'], f['name'])
+            file_bytes = download_with_retry(f['id'], f['name'], api_key)
             raw.append({'filename': f['name'], 'bytes': file_bytes})
         except (PermissionError, RuntimeError, ConnectionError, ValueError) as e:
             errors.append(str(e))
+            status_placeholder.text(f"⚠️ Failed: {f['name']} — {str(e)[:80]}")
         except Exception as e:
             errors.append(f"'{f['name']}': Unexpected error — {e}")
         progress_bar.progress((i + 1) / len(drive_files))
@@ -1403,13 +1624,14 @@ st.set_page_config(
 
 # ── Session state initialisation ─────────────────────────────────
 _defaults = {
-    'processed_data':  [],
-    'processing_done': False,
-    'matching':        [],
-    'non_matching':    [],
-    'searched':        False,
-    'last_terms':      '',
-    'last_match_mode': 'Any term (OR)',
+    'processed_data':   [],
+    'processing_done':  False,
+    'matching':         [],
+    'non_matching':     [],
+    'searched':         False,
+    'last_terms':       '',
+    'last_match_mode':  'Any term (OR)',
+    'report':           {},   # processing report data
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
@@ -1440,7 +1662,7 @@ if not st.session_state.processing_done:
 
     source_tab, drive_tab = st.tabs(["📁 Upload Files", "☁️ Google Drive Folder"])
 
-    # ── Shared search input (outside tabs so it's always visible) ─
+    # ── Shared search input ───────────────────────────────────────
     st.markdown("---")
     st.subheader("🔍 Search / Filter (optional)")
     st.caption(
@@ -1468,19 +1690,20 @@ if not st.session_state.processing_done:
     # ── TAB 1: Local upload ───────────────────────────────────────
     with source_tab:
         uploaded_files = st.file_uploader(
-            "Upload Resumes (PDF or DOCX) — up to 100 files. Any other file type will be ignored.",
+            "Upload Resumes (PDF or DOCX) — up to 200 files. Any other file type will be ignored.",
             type=["pdf", "docx"],
             accept_multiple_files=True,
             key="file_uploader",
         )
         if uploaded_files:
-            n = min(len(uploaded_files), 100)
+            n = min(len(uploaded_files), 200)
             st.info(f"📂 **{n}** compatible file(s) selected")
 
         if st.button("🚀 Process & Search", type="primary", disabled=not uploaded_files, key="btn_upload"):
-            files_to_process = uploaded_files[:100]
+            files_to_process = uploaded_files[:200]
             all_data: List[Dict] = []
             failed:   List[str]  = []
+            no_text:  List[str]  = []
             prog   = st.progress(0)
             status = st.empty()
 
@@ -1491,22 +1714,27 @@ if not st.session_state.processing_done:
                     if result:
                         all_data.append(result)
                     else:
-                        failed.append(f"{f.name} (no text extracted)")
+                        no_text.append(f"{f.name} (no text extracted — likely scanned/image PDF)")
                 except Exception as e:
                     failed.append(f"{f.name} ({e})")
                 prog.progress((i + 1) / len(files_to_process))
 
             prog.empty(); status.empty()
 
-            if failed:
-                st.warning(f"⚠️ Skipped {len(failed)} file(s): " + ", ".join(failed[:5]))
-
             st.session_state.processed_data  = all_data
             st.session_state.processing_done = True
             st.session_state.last_terms      = search_input
             st.session_state.last_match_mode = match_mode
+            st.session_state.report          = {
+                'total_input':    len(files_to_process),
+                'processed':      len(all_data),
+                'no_text':        no_text,
+                'errors':         failed,
+                'skipped':        [],
+                'download_errors': [],
+                'source':         'upload',
+            }
 
-            # Auto-run search if terms were provided
             if search_input.strip() and all_data:
                 terms     = [t.strip() for t in search_input.split(',') if t.strip()]
                 match_all = "AND" in match_mode
@@ -1525,9 +1753,9 @@ if not st.session_state.processing_done:
             **How to use:**
             1. Open the Google Drive folder containing your resumes
             2. Click **Share → Anyone with the link → Viewer**
-            3. Paste the link below  
-            
-            > Only **PDF** and **DOCX** files will be processed. All other file types are automatically ignored.
+            3. Paste the link below
+
+            > Only **PDF** and **DOCX** files will be processed. Excel, PPT, subfolders and all other types are automatically ignored.
             """
         )
 
@@ -1555,24 +1783,16 @@ if not st.session_state.processing_done:
                 prog   = st.progress(0)
                 status = st.empty()
 
-                raw_files, errors, skipped_info = fetch_resumes_from_drive(
+                raw_files, download_errors, skipped_info = fetch_resumes_from_drive(
                     folder_id, GOOGLE_DRIVE_API_KEY, status, prog
                 )
 
                 prog.empty(); status.empty()
 
-                # Show skipped files (informational)
-                for info in skipped_info:
-                    st.info(f"ℹ️ {info}")
-
-                # Show errors (actual problems)
-                if errors:
-                    for err in errors:
-                        st.error(f"❌ {err}")
-
                 if raw_files:
                     all_data: List[Dict] = []
-                    failed:   List[str]  = []
+                    no_text:  List[str]  = []
+                    extract_errors: List[str] = []
                     prog2   = st.progress(0)
                     status2 = st.empty()
 
@@ -1583,22 +1803,28 @@ if not st.session_state.processing_done:
                             if result:
                                 all_data.append(result)
                             else:
-                                failed.append(f"{item['filename']} (no text extracted)")
+                                no_text.append(f"{item['filename']} — no text extracted (scanned/image PDF or corrupted)")
                         except Exception as e:
-                            failed.append(f"{item['filename']} ({e})")
+                            extract_errors.append(f"{item['filename']} — {e}")
                         prog2.progress((i + 1) / len(raw_files))
 
                     prog2.empty(); status2.empty()
-
-                    if failed:
-                        st.warning("⚠️ Skipped during extraction: " + ", ".join(failed[:5]))
 
                     st.session_state.processed_data  = all_data
                     st.session_state.processing_done = True
                     st.session_state.last_terms      = search_input
                     st.session_state.last_match_mode = match_mode
+                    st.session_state.report          = {
+                        'total_input':     len(raw_files) + len(download_errors),
+                        'downloaded':      len(raw_files),
+                        'processed':       len(all_data),
+                        'no_text':         no_text,
+                        'errors':          extract_errors,
+                        'skipped':         skipped_info,
+                        'download_errors': download_errors,
+                        'source':          'drive',
+                    }
 
-                    # Auto-run search if terms were provided
                     if search_input.strip() and all_data:
                         terms     = [t.strip() for t in search_input.split(',') if t.strip()]
                         match_all = "AND" in match_mode
@@ -1610,9 +1836,11 @@ if not st.session_state.processing_done:
                     st.success(f"✅ Processed **{len(all_data)}** resumes from Google Drive!")
                     st.rerun()
 
-                elif not errors:
-                    # raw_files is empty but no errors either — already shown above
+                elif not download_errors:
                     st.warning("No processable files were downloaded. Please check the folder contents and sharing settings.")
+                else:
+                    for err in download_errors:
+                        st.error(f"❌ {err}")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1621,9 +1849,80 @@ if not st.session_state.processing_done:
 
 else:
     data: List[Dict] = st.session_state.processed_data
+    report: Dict     = st.session_state.get('report', {})
+
     st.success(f"✅ **{len(data)}** resumes loaded")
 
-    # ── Inline re-search bar ─────────────────────────────────────
+    # ── Processing Report ─────────────────────────────────────────
+    if report:
+        source = report.get('source', '')
+        total  = report.get('total_input', 0)
+        processed = report.get('processed', 0)
+        no_text   = report.get('no_text', [])
+        errors    = report.get('errors', [])
+        skipped   = report.get('skipped', [])
+        dl_errors = report.get('download_errors', [])
+        downloaded = report.get('downloaded', total)
+
+        # Show report only if there are gaps/issues to explain
+        has_issues = (no_text or errors or skipped or dl_errors or processed < total)
+
+        if has_issues:
+            with st.expander(
+                f"📊 Processing Report — {processed}/{total} files processed successfully. "
+                f"{'⚠️ Click to see what happened to the rest.' if processed < total else ''}",
+                expanded=(processed < total)
+            ):
+                # Summary table
+                if source == 'drive':
+                    st.markdown(f"""
+| Stage | Count |
+|---|---|
+| 📁 Total files found in folder | **{total}** |
+| ⏭️ Skipped (non-PDF/DOCX, subfolders) | **{len(skipped)}** |
+| ❌ Download failures | **{len(dl_errors)}** |
+| ⬇️ Downloaded successfully | **{downloaded}** |
+| ⚠️ No text extracted (scanned/corrupt) | **{len(no_text)}** |
+| ✅ Successfully processed | **{processed}** |
+                    """)
+                else:
+                    st.markdown(f"""
+| Stage | Count |
+|---|---|
+| 📁 Total files uploaded | **{total}** |
+| ⚠️ No text extracted (scanned/corrupt) | **{len(no_text)}** |
+| ❌ Processing errors | **{len(errors)}** |
+| ✅ Successfully processed | **{processed}** |
+                    """)
+
+                if dl_errors:
+                    st.markdown("---")
+                    st.markdown(f"**❌ Download failures ({len(dl_errors)}):**")
+                    for e in dl_errors:
+                        st.caption(f"• {e}")
+
+                if no_text:
+                    st.markdown("---")
+                    st.markdown(
+                        f"**⚠️ Files with no extractable text ({len(no_text)}) — "
+                        "these are likely scanned/image-based PDFs:**"
+                    )
+                    for f in no_text:
+                        st.caption(f"• {f}")
+
+                if errors:
+                    st.markdown("---")
+                    st.markdown(f"**❌ Processing errors ({len(errors)}):**")
+                    for e in errors:
+                        st.caption(f"• {e}")
+
+                if skipped:
+                    st.markdown("---")
+                    st.markdown(f"**ℹ️ Skipped files ({len(skipped)}):**")
+                    for s in skipped:
+                        st.caption(f"• {s}")
+
+    # ── Inline re-search bar ──────────────────────────────────────
     st.subheader("🔍 Search & Filter")
     col_input2, col_mode2 = st.columns([4, 1])
     with col_input2:
@@ -1648,10 +1947,10 @@ else:
         terms     = [t.strip() for t in search_input2.split(',') if t.strip()]
         match_all = "AND" in match_mode2
         m, nm     = search_resumes(data, terms, match_all)
-        st.session_state.matching     = m
-        st.session_state.non_matching = nm
-        st.session_state.searched     = True
-        st.session_state.last_terms   = search_input2
+        st.session_state.matching        = m
+        st.session_state.non_matching    = nm
+        st.session_state.searched        = True
+        st.session_state.last_terms      = search_input2
         st.session_state.last_match_mode = match_mode2
 
     # ── RESULTS ──────────────────────────────────────────────────
@@ -1721,6 +2020,6 @@ else:
             key="dl_all_initial",
         )
 
-# ── Footer ─────────────────────────────────────────────────────────
+# ── Footer ──────────────────────────────────────────────────────────
 st.divider()
 st.caption("Have a GOOD DAY!!!")
